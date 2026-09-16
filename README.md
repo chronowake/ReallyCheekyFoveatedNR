@@ -1,6 +1,6 @@
 This is a fork of Cheeky that is focused on NR only and Compatibility with REAL VR. Not Original cheeky! 
 
-Version 09-13-26 adds a Pre-SR NR pass option and compatibility with BG3! 
+Version 1.0.0 adds a before-SR pass option, fixes some cropping errors and adds support for BG3. 
 
 ####################Original Readme Follows Below###################################################
 
