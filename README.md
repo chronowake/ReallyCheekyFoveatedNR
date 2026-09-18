@@ -1,4 +1,4 @@
-This is an NR only fork of cheeky, not the original. It is built for compatibility with R.E.A.L. VR, that is its sole purpose. Works with most DX12 games and BG3 while using Luke Ross's R.E.A.L. VR. 
+This is an NR only fork of cheeky, not the original. It is built for compatibility with R.E.A.L. VR, that is its sole purpose. Works with most DX12 games and BG3 while using Luke Ross's R.E.A.L. VR Framework. 
 Does not currently work with 007 First Light. 
 
 **Note:** the native SteamVR / OpenVR gaze adapter described in the original readme is not active in this fork. Eye tracking and automatic stereo alignment work through the OpenXR layer only.
