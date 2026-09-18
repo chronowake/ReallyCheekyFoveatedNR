@@ -44,32 +44,42 @@ namespace {
     const std::uint32_t output_origin_y,
     FoveationGeometry& geometry
 ) noexcept {
-    const auto input_end_x = input_start_x + input_width;
-    const auto input_end_y = input_start_y + input_height;
-    const auto relative_output_start_x = static_cast<std::uint32_t>(std::floor(
+    const auto mapped_width = (std::min)(
+        output_width,
+        (std::max)(
+            1U,
+            static_cast<std::uint32_t>(std::lround(
+                static_cast<double>(input_width) * output_width / render_width
+            ))
+        )
+    );
+    const auto mapped_height = (std::min)(
+        output_height,
+        (std::max)(
+            1U,
+            static_cast<std::uint32_t>(std::lround(
+                static_cast<double>(input_height) * output_height / render_height
+            ))
+        )
+    );
+    auto relative_output_start_x = static_cast<std::uint32_t>(std::floor(
         static_cast<double>(input_start_x) * output_width / render_width
     ));
-    const auto relative_output_start_y = static_cast<std::uint32_t>(std::floor(
+    auto relative_output_start_y = static_cast<std::uint32_t>(std::floor(
         static_cast<double>(input_start_y) * output_height / render_height
     ));
-    const auto relative_output_end_x = (std::min)(
-        output_width,
-        static_cast<std::uint32_t>(std::ceil(
-            static_cast<double>(input_end_x) * output_width / render_width
-        ))
-    );
-    const auto relative_output_end_y = (std::min)(
-        output_height,
-        static_cast<std::uint32_t>(std::ceil(
-            static_cast<double>(input_end_y) * output_height / render_height
-        ))
-    );
+    if (relative_output_start_x + mapped_width > output_width) {
+        relative_output_start_x = output_width - mapped_width;
+    }
+    if (relative_output_start_y + mapped_height > output_height) {
+        relative_output_start_y = output_height - mapped_height;
+    }
     geometry = {
         input_start_x, input_start_y, input_width, input_height,
         output_origin_x + relative_output_start_x,
         output_origin_y + relative_output_start_y,
-        relative_output_end_x - relative_output_start_x,
-        relative_output_end_y - relative_output_start_y,
+        mapped_width,
+        mapped_height,
     };
     return geometry.output_width != 0U && geometry.output_height != 0U;
 }

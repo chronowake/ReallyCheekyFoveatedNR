@@ -1,8 +1,11 @@
 #include "diagnostics.hpp"
 
+#include "runtime.hpp"
+
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 
@@ -388,6 +391,170 @@ bool diagnostic_should_sample_gpu_time(
         }
     }
     return false;
+}
+
+namespace {
+
+constexpr auto jitter_window = std::chrono::milliseconds(2000);
+constexpr std::size_t jitter_top_count = 8U;
+
+struct JitterStat {
+    std::uint32_t count{};
+    double sum{};
+    double min{};
+    double max{};
+    // Largest samples seen this window, descending. With windows under
+    // jitter_top_count * 100 samples this makes p99 exact instead of estimated.
+    std::array<double, jitter_top_count> top{};
+
+    void add(const double value) noexcept {
+        if (count == 0U || value < min) min = value;
+        if (count == 0U || value > max) max = value;
+        sum += value;
+        ++count;
+        for (std::size_t index = 0U; index < top.size(); ++index) {
+            if (value <= top[index]) continue;
+            for (auto shift = top.size() - 1U; shift > index; --shift) {
+                top[shift] = top[shift - 1U];
+            }
+            top[index] = value;
+            break;
+        }
+    }
+
+    [[nodiscard]] double average() const noexcept {
+        return count == 0U ? 0.0 : sum / static_cast<double>(count);
+    }
+
+    [[nodiscard]] double percentile99() const noexcept {
+        if (count == 0U) return 0.0;
+        const auto index = static_cast<std::size_t>(count / 100U);
+        return index < top.size() ? top[index] : top[top.size() - 1U];
+    }
+};
+
+struct JitterState {
+    std::mutex mutex;
+    std::array<JitterStat, static_cast<std::size_t>(JitterProbe::count)> stats{};
+    std::int64_t window_start_ns{};
+    std::int64_t last_frame_ns{};
+    std::uint32_t spikes_over_20ms{};
+    std::uint32_t spikes_over_33ms{};
+};
+
+JitterState jitter{};
+
+[[nodiscard]] JitterStat& jitter_stat(const JitterProbe probe) noexcept {
+    return jitter.stats[static_cast<std::size_t>(probe)];
+}
+
+void append_jitter_section(
+    char* const buffer,
+    const std::size_t capacity,
+    std::size_t& offset,
+    const char* const label,
+    const JitterStat& stat
+) noexcept {
+    if (stat.count == 0U || offset >= capacity) return;
+    const auto written = std::snprintf(
+        buffer + offset,
+        capacity - offset,
+        " | %s=%.2f/%.2f/%.2f n=%u",
+        label,
+        stat.min,
+        stat.average(),
+        stat.max,
+        stat.count
+    );
+    if (written > 0) {
+        offset += static_cast<std::size_t>(written);
+        if (offset > capacity) offset = capacity;
+    }
+}
+
+}  // namespace
+
+std::int64_t diagnostic_jitter_now_ns() noexcept {
+    return steady_now_ns();
+}
+
+void diagnostic_note_jitter(
+    const JitterProbe probe,
+    const double milliseconds
+) noexcept {
+    if (!(milliseconds >= 0.0) || probe == JitterProbe::count) return;
+    std::lock_guard lock(jitter.mutex);
+    jitter_stat(probe).add(milliseconds);
+}
+
+void diagnostic_note_jitter_frame() noexcept {
+    const auto now = steady_now_ns();
+    JitterState snapshot_source{};
+    double window_ms{};
+    {
+        std::lock_guard lock(jitter.mutex);
+        if (jitter.window_start_ns == 0) jitter.window_start_ns = now;
+        if (jitter.last_frame_ns != 0) {
+            const auto interval_ms =
+                static_cast<double>(now - jitter.last_frame_ns) / 1'000'000.0;
+            jitter_stat(JitterProbe::evaluate_interval).add(interval_ms);
+            if (interval_ms > 20.0) ++jitter.spikes_over_20ms;
+            if (interval_ms > 33.0) ++jitter.spikes_over_33ms;
+        }
+        jitter.last_frame_ns = now;
+        const auto elapsed_ns = now - jitter.window_start_ns;
+        constexpr auto window_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                jitter_window
+            ).count();
+        if (elapsed_ns < window_ns) return;
+        window_ms = static_cast<double>(elapsed_ns) / 1'000'000.0;
+        snapshot_source.stats = jitter.stats;
+        snapshot_source.spikes_over_20ms = jitter.spikes_over_20ms;
+        snapshot_source.spikes_over_33ms = jitter.spikes_over_33ms;
+        jitter.stats = {};
+        jitter.spikes_over_20ms = 0U;
+        jitter.spikes_over_33ms = 0U;
+        jitter.window_start_ns = now;
+    }
+
+    const auto& interval =
+        snapshot_source.stats[static_cast<std::size_t>(
+            JitterProbe::evaluate_interval
+        )];
+    if (interval.count == 0U) return;
+    const auto average = interval.average();
+    char line[512]{};
+    auto written = std::snprintf(
+        line,
+        sizeof(line),
+        "JITTER win=%.2fs calls=%u rate=%.1f/s dt=%.2f/%.2f/%.2f/%.2f "
+        "spikes>20ms=%u >33ms=%u",
+        window_ms / 1000.0,
+        interval.count,
+        average > 0.0 ? 1000.0 / average : 0.0,
+        interval.min,
+        average,
+        interval.max,
+        interval.percentile99(),
+        snapshot_source.spikes_over_20ms,
+        snapshot_source.spikes_over_33ms
+    );
+    auto offset = written > 0 ? static_cast<std::size_t>(written) : 0U;
+    const auto section = [&](const JitterProbe probe, const char* const label) {
+        append_jitter_section(
+            line,
+            sizeof(line),
+            offset,
+            label,
+            snapshot_source.stats[static_cast<std::size_t>(probe)]
+        );
+    };
+    section(JitterProbe::nr_submit_cpu, "nrCpu");
+    section(JitterProbe::transport_evaluate_cpu, "txCpu");
+    section(JitterProbe::transport_fence_wait_cpu, "fence");
+    section(JitterProbe::nr_gpu, "nrGpu");
+    trace_event("%s", line);
 }
 
 void diagnostic_note_d3d11_execution_path(

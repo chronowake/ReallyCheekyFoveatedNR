@@ -1,0 +1,1 @@
+This release fixes some cropping errors, implements a before-SR NR pass option and now works with BG3. Remember to delete your old Cheeky addon so they don't fight each other. Settings should carry over from your old version to this one. 

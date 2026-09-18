@@ -54,6 +54,36 @@ FoveationParameters dlss_nr_foveation_parameters(
     return parameters;
 }
 
+DlssNrAxis dlss_nr_aligned_axis(const std::uint32_t base,
+    const std::uint32_t extent, const std::uint32_t capacity) noexcept {
+    const auto size = static_cast<std::uint32_t>((std::min)(
+        static_cast<std::uint64_t>(capacity),
+        (static_cast<std::uint64_t>(extent) + 7U) / 8U * 8U));
+    return {(std::min)(base - base % 8U, capacity - size), size};
+}
+
+bool dlss_nr_motion_offset(const DlssNrHistory& previous,
+    const DlssNrHistory& current, float& x, float& y) noexcept {
+    x = y = 0.0F;
+    if (previous.width != current.width || previous.height != current.height ||
+        previous.output_width != current.output_width ||
+        previous.output_height != current.output_height ||
+        previous.working_width != current.working_width ||
+        previous.working_height != current.working_height ||
+        previous.scale_x != current.scale_x || previous.scale_y != current.scale_y ||
+        current.width == 0U || current.height == 0U) return false;
+    const auto dx = static_cast<double>(current.x) - previous.x;
+    const auto dy = static_cast<double>(current.y) - previous.y;
+    // There is no reusable overlap after a jump larger than the region.
+    if (std::abs(dx) >= current.width || std::abs(dy) >= current.height) return false;
+    if (dx == 0.0 && dy == 0.0) return true;
+    if (!std::isfinite(current.scale_x) || !std::isfinite(current.scale_y) ||
+        !std::isfinite(previous.scale_x) || !std::isfinite(previous.scale_y)) return false;
+    x = static_cast<float>(dx / current.width);
+    y = static_cast<float>(dy / current.height);
+    return std::isfinite(x) && std::isfinite(y);
+}
+
 DlssNrDisplayedView dlss_nr_displayed_view(
     const std::uint32_t view_width,
     const std::uint32_t view_height,
@@ -62,12 +92,14 @@ DlssNrDisplayedView dlss_nr_displayed_view(
 ) noexcept {
     const auto span_width = travel_width == 0U ? view_width : travel_width;
     const auto span_height = travel_height == 0U ? view_height : travel_height;
+    // True SBS/TAB is ~2x on one axis and ~1x on the other. A look-around
+    // square (Forbidden West) is larger on both axes and is not stereo packing.
     const bool packed_sbs =
         view_width != 0U && span_width >= view_width * 2U &&
-        (view_height == 0U || span_height < view_height * 2U);
+        (view_height == 0U || span_height <= view_height + 8U);
     const bool packed_tab =
         view_height != 0U && span_height >= view_height * 2U &&
-        (view_width == 0U || span_width < view_width * 2U);
+        (view_width == 0U || span_width <= view_width + 8U);
     return {
         packed_sbs ? view_width : span_width,
         packed_tab ? view_height : span_height,
@@ -76,59 +108,21 @@ DlssNrDisplayedView dlss_nr_displayed_view(
     };
 }
 
-DlssNrDisplayedView dlss_nr_pre_upscale_canvas(
-    const std::uint32_t input_width,
-    const std::uint32_t input_height,
-    const std::uint32_t output_width,
-    const std::uint32_t output_height,
+DlssNrDisplayedView dlss_nr_travel_extent(
+    const std::uint32_t view_width,
+    const std::uint32_t view_height,
     const std::uint32_t color_width,
-    const std::uint32_t color_height
+    const std::uint32_t color_height,
+    const bool before_upscale
 ) noexcept {
-    const auto input_w = input_width == 0U ? color_width : input_width;
-    const auto input_h = input_height == 0U ? color_height : input_height;
-    const auto color_w = color_width == 0U ? input_w : color_width;
-    const auto color_h = color_height == 0U ? input_h : color_height;
-    const auto packed_sbs =
-        input_w != 0U && color_w >= input_w * 2U &&
-        (input_h == 0U || color_h < input_h * 2U);
-    const auto packed_tab =
-        input_h != 0U && color_h >= input_h * 2U &&
-        (input_w == 0U || color_w < input_w * 2U);
-    if (packed_sbs || packed_tab) {
-        return dlss_nr_displayed_view(
-            input_w, input_h, color_w, color_h
-        );
+    if (before_upscale) {
+        const auto width = view_width == 0U ? color_width : view_width;
+        const auto height = view_height == 0U ? color_height : view_height;
+        return {width, height, width, height};
     }
-    const bool output_sized_color =
-        output_width != 0U && output_height != 0U &&
-        color_w + 8U >= output_width && color_h + 8U >= output_height &&
-        (color_w > input_w + 8U || color_h > input_h + 8U);
-    if (output_sized_color) {
-        return dlss_nr_displayed_view(input_w, input_h, input_w, input_h);
-    }
-    return dlss_nr_displayed_view(
-        input_w,
-        input_h,
-        (std::max)(input_w, color_w),
-        (std::max)(input_h, color_h)
-    );
-}
-
-void apply_nr_after_polish(Settings& settings) noexcept {
-    settings.nr_foveated = true;
-    settings.nr_width = std::clamp(settings.nr_width * 0.70F, 0.20F, 1.0F);
-    settings.nr_height = std::clamp(settings.nr_height * 0.70F, 0.20F, 1.0F);
-    settings.nr_working_scale =
-        std::clamp(settings.nr_working_scale * 0.50F, 0.10F, 0.50F);
-    settings.nr_color_strength = std::clamp(
-        settings.nr_color_strength * 0.40F, 0.0F, 1.0F
-    );
-    settings.nr_hdr_transfer_strength = std::clamp(
-        settings.nr_hdr_transfer_strength * 0.50F, 0.0F, 1.0F
-    );
-    settings.nr_transition_width = std::clamp(
-        (std::max)(settings.nr_transition_width, 0.08F), 0.0F, 0.30F
-    );
+    const auto span_width = (std::max)(view_width, color_width);
+    const auto span_height = (std::max)(view_height, color_height);
+    return {span_width, span_height, span_width, span_height};
 }
 
 void apply_nr_gaze_uv(
@@ -222,11 +216,25 @@ DlssNrViewCrop calculate_dlss_nr_view_crop(
             static_cast<double>(eye_base_y) +
             0.5 * static_cast<double>(size_height) +
             static_cast<double>(settings.nr_height_offset) * span_height;
+        // Source X/Y is a pixel inset of the visible picture inside its
+        // texture, so it only holds at the resolution it was measured at.
+        // Before SR the span is the render target, after SR the upscaled
+        // output, so scale it into the current span. Every other term here is
+        // already span- or size-relative; leaving this one in raw pixels moves
+        // the box to a different part of the picture when the pass switches.
+        const auto source_scale_x = render_width == 0U ? 1.0
+            : static_cast<double>(span_width) /
+                static_cast<double>(render_width);
+        const auto source_scale_y = render_height == 0U ? 1.0
+            : static_cast<double>(span_height) /
+                static_cast<double>(render_height);
         const auto origin_x = static_cast<std::int64_t>(std::llround(
-            center_x - 0.5 * crop.width + settings.nr_source_x
+            center_x - 0.5 * crop.width +
+            static_cast<double>(settings.nr_source_x) * source_scale_x
         ));
         const auto origin_y = static_cast<std::int64_t>(std::llround(
-            center_y - 0.5 * crop.height + settings.nr_source_y
+            center_y - 0.5 * crop.height +
+            static_cast<double>(settings.nr_source_y) * source_scale_y
         ));
         crop.origin_x = align_down(origin_x);
         crop.origin_y = align_down(origin_y);

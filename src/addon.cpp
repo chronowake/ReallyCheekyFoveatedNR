@@ -1,4 +1,4 @@
-#include "backend.hpp"
+﻿#include "backend.hpp"
 #include "d3d11_d3d12_transport.hpp"
 #include "d3d11_peripheral_dlaa.hpp"
 #include "diagnostics.hpp"
@@ -8,8 +8,6 @@
 #include "settings.hpp"
 #include "cheeky_gaze_abi.h"
 #include "version.h"
-
-#include <Windows.h>
 
 #define ImTextureID ImU64
 #include <imgui.h>
@@ -33,142 +31,11 @@ std::atomic<LogMessageFn> reshade_log{};
 std::atomic<HANDLE> trace_log{};
 SRWLOCK trace_log_lock = SRWLOCK_INIT;
 
-constexpr char config_section[] = CHEEKY_ADDON_STEM;
+constexpr char config_section[] = "ReallyCheekyFoveatedNR";
+// Settings saved before the rename live under the old section. Read those once
+// so per-game tuning survives the upgrade; the next save writes the new name.
+constexpr char legacy_config_section[] = "CheekyFoveatedDLSS";
 std::atomic<bool> toggle_hotkey_down{};
-std::atomic<bool> nr_hotkey_capturing{};
-std::atomic<bool> nr_hotkey_wait_release{};
-
-[[nodiscard]] bool vk_down(const std::uint32_t vk) noexcept {
-    return vk != 0U && (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0;
-}
-
-[[nodiscard]] bool is_modifier_imgui_key(const ImGuiKey key) noexcept {
-    return key == ImGuiKey_LeftCtrl || key == ImGuiKey_RightCtrl ||
-        key == ImGuiKey_LeftShift || key == ImGuiKey_RightShift ||
-        key == ImGuiKey_LeftAlt || key == ImGuiKey_RightAlt ||
-        key == ImGuiKey_LeftSuper || key == ImGuiKey_RightSuper ||
-        key == ImGuiKey_Menu || key == ImGuiKey_CapsLock ||
-        key == ImGuiKey_ReservedForModCtrl ||
-        key == ImGuiKey_ReservedForModShift ||
-        key == ImGuiKey_ReservedForModAlt ||
-        key == ImGuiKey_ReservedForModSuper;
-}
-
-[[nodiscard]] std::uint32_t imgui_key_to_vk(const ImGuiKey key) noexcept {
-    if (key >= ImGuiKey_0 && key <= ImGuiKey_9) {
-        return static_cast<std::uint32_t>('0' + (key - ImGuiKey_0));
-    }
-    if (key >= ImGuiKey_A && key <= ImGuiKey_Z) {
-        return static_cast<std::uint32_t>('A' + (key - ImGuiKey_A));
-    }
-    if (key >= ImGuiKey_F1 && key <= ImGuiKey_F24) {
-        return static_cast<std::uint32_t>(VK_F1 + (key - ImGuiKey_F1));
-    }
-    if (key >= ImGuiKey_Keypad0 && key <= ImGuiKey_Keypad9) {
-        return static_cast<std::uint32_t>(VK_NUMPAD0 + (key - ImGuiKey_Keypad0));
-    }
-    switch (key) {
-    case ImGuiKey_Tab: return VK_TAB;
-    case ImGuiKey_LeftArrow: return VK_LEFT;
-    case ImGuiKey_RightArrow: return VK_RIGHT;
-    case ImGuiKey_UpArrow: return VK_UP;
-    case ImGuiKey_DownArrow: return VK_DOWN;
-    case ImGuiKey_PageUp: return VK_PRIOR;
-    case ImGuiKey_PageDown: return VK_NEXT;
-    case ImGuiKey_Home: return VK_HOME;
-    case ImGuiKey_End: return VK_END;
-    case ImGuiKey_Insert: return VK_INSERT;
-    case ImGuiKey_Delete: return VK_DELETE;
-    case ImGuiKey_Backspace: return VK_BACK;
-    case ImGuiKey_Space: return VK_SPACE;
-    case ImGuiKey_Enter: return VK_RETURN;
-    case ImGuiKey_Apostrophe: return VK_OEM_7;
-    case ImGuiKey_Comma: return VK_OEM_COMMA;
-    case ImGuiKey_Minus: return VK_OEM_MINUS;
-    case ImGuiKey_Period: return VK_OEM_PERIOD;
-    case ImGuiKey_Slash: return VK_OEM_2;
-    case ImGuiKey_Semicolon: return VK_OEM_1;
-    case ImGuiKey_Equal: return VK_OEM_PLUS;
-    case ImGuiKey_LeftBracket: return VK_OEM_4;
-    case ImGuiKey_Backslash: return VK_OEM_5;
-    case ImGuiKey_RightBracket: return VK_OEM_6;
-    case ImGuiKey_GraveAccent: return VK_OEM_3;
-    case ImGuiKey_ScrollLock: return VK_SCROLL;
-    case ImGuiKey_NumLock: return VK_NUMLOCK;
-    case ImGuiKey_PrintScreen: return VK_SNAPSHOT;
-    case ImGuiKey_Pause: return VK_PAUSE;
-    case ImGuiKey_KeypadDecimal: return VK_DECIMAL;
-    case ImGuiKey_KeypadDivide: return VK_DIVIDE;
-    case ImGuiKey_KeypadMultiply: return VK_MULTIPLY;
-    case ImGuiKey_KeypadSubtract: return VK_SUBTRACT;
-    case ImGuiKey_KeypadAdd: return VK_ADD;
-    case ImGuiKey_KeypadEnter: return VK_RETURN;
-    case ImGuiKey_KeypadEqual: return VK_OEM_PLUS;
-    case ImGuiKey_Oem102: return VK_OEM_102;
-    default: return 0U;
-    }
-}
-
-[[nodiscard]] std::uint32_t first_imgui_hotkey_pressed() noexcept {
-    for (int key = ImGuiKey_Tab; key <= ImGuiKey_Oem102; ++key) {
-        const auto imgui_key = static_cast<ImGuiKey>(key);
-        if (imgui_key == ImGuiKey_Escape || is_modifier_imgui_key(imgui_key)) {
-            continue;
-        }
-        if (!ImGui::IsKeyPressed(imgui_key, false)) continue;
-        return imgui_key_to_vk(imgui_key);
-    }
-    return 0U;
-}
-
-void format_nr_hotkey(
-    const Settings& settings,
-    char* const buffer,
-    const std::size_t size
-) noexcept {
-    if (buffer == nullptr || size == 0U) return;
-    if (settings.nr_toggle_vk == 0U) {
-        std::snprintf(buffer, size, "None");
-        return;
-    }
-    wchar_t wide[64]{};
-    const auto scan = MapVirtualKeyW(settings.nr_toggle_vk, MAPVK_VK_TO_VSC);
-    LONG lparam = static_cast<LONG>(scan) << 16;
-    if (settings.nr_toggle_vk == VK_LEFT || settings.nr_toggle_vk == VK_RIGHT ||
-        settings.nr_toggle_vk == VK_UP || settings.nr_toggle_vk == VK_DOWN ||
-        settings.nr_toggle_vk == VK_DELETE || settings.nr_toggle_vk == VK_INSERT ||
-        settings.nr_toggle_vk == VK_HOME || settings.nr_toggle_vk == VK_END ||
-        settings.nr_toggle_vk == VK_PRIOR || settings.nr_toggle_vk == VK_NEXT ||
-        settings.nr_toggle_vk == VK_NUMLOCK || settings.nr_toggle_vk == VK_DIVIDE) {
-        lparam |= 1 << 24;
-    }
-    char key[64]{};
-    if (GetKeyNameTextW(lparam, wide, static_cast<int>(std::size(wide))) > 0) {
-        WideCharToMultiByte(
-            CP_UTF8, 0, wide, -1, key, static_cast<int>(sizeof(key)), nullptr, nullptr
-        );
-    }
-    if (key[0] == '\0') {
-        std::snprintf(key, sizeof(key), "VK %u", settings.nr_toggle_vk);
-    }
-    std::snprintf(
-        buffer,
-        size,
-        "%s%s%s%s",
-        settings.nr_toggle_ctrl ? "Ctrl+" : "",
-        settings.nr_toggle_alt ? "Alt+" : "",
-        settings.nr_toggle_shift ? "Shift+" : "",
-        key
-    );
-}
-
-[[nodiscard]] bool nr_toggle_hotkey_down(const Settings& settings) noexcept {
-    if (settings.nr_toggle_vk == 0U) return false;
-    return vk_down(settings.nr_toggle_vk) &&
-        vk_down(VK_CONTROL) == settings.nr_toggle_ctrl &&
-        vk_down(VK_MENU) == settings.nr_toggle_alt &&
-        vk_down(VK_SHIFT) == settings.nr_toggle_shift;
-}
 
 struct DiagnosticDisplayCache {
     DiagnosticSnapshot snapshot{};
@@ -856,196 +723,193 @@ void load_settings_from_reshade() noexcept {
     settings.peripheral_dlaa_enabled = false;
     settings.nr_use_sr_foveation = false;
     auto center_mode = static_cast<std::uint32_t>(settings.center_mode);
+    // A pre-rename config has no new section, so read the old one this once.
+    const auto section_has_settings = [](const char* const candidate) noexcept {
+        bool probe{};
+        return reshade::get_config_value(
+            nullptr, candidate, "NrEnabled", probe
+        );
+    };
+    const char* const section =
+        (!section_has_settings(config_section) &&
+         section_has_settings(legacy_config_section))
+            ? legacy_config_section
+            : config_section;
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "Enabled", settings.enabled
+        nullptr, section, "Enabled", settings.enabled
     ));
     settings.enabled = false;
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "D3D11D3D12Transport",
+        nullptr, section, "D3D11D3D12Transport",
         settings.d3d11_use_d3d12_transport
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "PeripheralDlaa",
+        nullptr, section, "PeripheralDlaa",
         settings.peripheral_dlaa_enabled
     ));
     settings.peripheral_dlaa_enabled = false;
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "PeripheralDlaaScale",
+        nullptr, section, "PeripheralDlaaScale",
         settings.peripheral_dlaa_scale
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "CenterPreset",
+        nullptr, section, "CenterPreset",
         settings.center_preset
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "PeripheralDlaaPreset",
+        nullptr, section, "PeripheralDlaaPreset",
         settings.peripheral_dlaa_preset
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "Width", settings.width
+        nullptr, section, "Width", settings.width
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "Height", settings.height
+        nullptr, section, "Height", settings.height
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "XOffset", settings.x_offset
+        nullptr, section, "XOffset", settings.x_offset
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "HeightOffset", settings.height_offset
+        nullptr, section, "HeightOffset", settings.height_offset
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "InvertStereoXOffset",
+        nullptr, section, "InvertStereoXOffset",
         settings.invert_stereo_x_offset
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "Roundness", settings.roundness
+        nullptr, section, "Roundness", settings.roundness
     ));
     static_cast<void>(reshade::get_config_value(
         nullptr,
-        config_section,
+        section,
         "TransitionWidth",
         settings.transition_width
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "AlignmentBorder",
+        nullptr, section, "AlignmentBorder",
         settings.alignment_border_enabled
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "CenterMode", center_mode
+        nullptr, section, "CenterMode", center_mode
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "AutoStereoAlignment", settings.auto_stereo_alignment));
+        nullptr, section, "AutoStereoAlignment", settings.auto_stereo_alignment));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "AlignedHeightOffset", settings.aligned_height_offset));
+        nullptr, section, "AlignedHeightOffset", settings.aligned_height_offset));
     settings.center_mode = center_mode <= 2U
         ? static_cast<FoveationCenterMode>(center_mode)
         : FoveationCenterMode::fixed;
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "ShowNextJumpTarget", settings.show_next_jump_target));
+        nullptr, section, "ShowNextJumpTarget", settings.show_next_jump_target));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "SimulationPattern", settings.simulation_pattern));
+        nullptr, section, "SimulationPattern", settings.simulation_pattern));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "GazeSmoothingMs",
+        nullptr, section, "GazeSmoothingMs",
         settings.gaze_smoothing_ms
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "GazeQuantizationPixels",
+        nullptr, section, "GazeQuantizationPixels",
         settings.gaze_quantization_pixels
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "GazeJumpResetRatio",
+        nullptr, section, "GazeJumpResetRatio",
         settings.gaze_jump_reset_ratio
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrEnabled", settings.nr_enabled
+        nullptr, section, "NrEnabled", settings.nr_enabled
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrBeforeSr", settings.nr_before_sr
+        nullptr, section, "NrBeforeSr", settings.nr_before_sr
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrAfterPolish", settings.nr_after_polish
+        nullptr, section, "NrFoveated", settings.nr_foveated
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrToggleVk", settings.nr_toggle_vk
-    ));
-    static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrToggleCtrl", settings.nr_toggle_ctrl
-    ));
-    static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrToggleAlt", settings.nr_toggle_alt
-    ));
-    static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrToggleShift", settings.nr_toggle_shift
-    ));
-    static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrFoveated", settings.nr_foveated
-    ));
-    static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrUseSrFoveation",
+        nullptr, section, "NrUseSrFoveation",
         settings.nr_use_sr_foveation
     ));
     settings.nr_use_sr_foveation = false;
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrAlignmentBorder",
+        nullptr, section, "NrAlignmentBorder",
         settings.nr_alignment_border_enabled
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrWidth", settings.nr_width
+        nullptr, section, "NrWidth", settings.nr_width
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrHeight", settings.nr_height
+        nullptr, section, "NrHeight", settings.nr_height
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrXOffset", settings.nr_x_offset
+        nullptr, section, "NrXOffset", settings.nr_x_offset
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrCenterX", settings.nr_center_x
+        nullptr, section, "NrCenterX", settings.nr_center_x
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrHeightOffset", settings.nr_height_offset
+        nullptr, section, "NrHeightOffset", settings.nr_height_offset
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrSourceX", settings.nr_source_x
+        nullptr, section, "NrSourceX", settings.nr_source_x
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrSourceY", settings.nr_source_y
+        nullptr, section, "NrSourceY", settings.nr_source_y
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrRoundness", settings.nr_roundness
+        nullptr, section, "NrRoundness", settings.nr_roundness
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrTransitionWidth",
+        nullptr, section, "NrTransitionWidth",
         settings.nr_transition_width
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrWorkingScale", settings.nr_working_scale
+        nullptr, section, "NrWorkingScale", settings.nr_working_scale
     ));
     settings.nr_working_scale = std::clamp(settings.nr_working_scale, 0.10F, 1.0F);
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrPreset", settings.nr_preset
+        nullptr, section, "NrPreset", settings.nr_preset
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrIntensity", settings.nr_intensity
+        nullptr, section, "NrIntensity", settings.nr_intensity
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrLocalToneStrength",
+        nullptr, section, "NrLocalToneStrength",
         settings.nr_local_tone_strength
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrLocalStructureStrength",
+        nullptr, section, "NrLocalStructureStrength",
         settings.nr_local_structure_strength
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrSkinStructureStrength",
+        nullptr, section, "NrSkinStructureStrength",
         settings.nr_skin_structure_strength
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrAutomaticMask", settings.nr_automatic_mask
+        nullptr, section, "NrAutomaticMask", settings.nr_automatic_mask
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrUiCorrection", settings.nr_ui_correction
+        nullptr, section, "NrUiCorrection", settings.nr_ui_correction
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrPaperWhiteScale",
+        nullptr, section, "NrPaperWhiteScale",
         settings.nr_paper_white_scale
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrHdrTransferStrength",
+        nullptr, section, "NrHdrTransferStrength",
         settings.nr_hdr_transfer_strength
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrColorStrength", settings.nr_color_strength
+        nullptr, section, "NrColorStrength", settings.nr_color_strength
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrDepthConvention",
+        nullptr, section, "NrDepthConvention",
         settings.nr_depth_convention
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrMotionScaleXMultiplier",
+        nullptr, section, "NrMotionScaleXMultiplier",
         settings.nr_motion_scale_x_multiplier
     ));
     static_cast<void>(reshade::get_config_value(
-        nullptr, config_section, "NrMotionScaleYMultiplier",
+        nullptr, section, "NrMotionScaleYMultiplier",
         settings.nr_motion_scale_y_multiplier
     ));
     update_settings(settings);
@@ -1130,21 +994,6 @@ void save_settings_to_reshade(const Settings& settings) noexcept {
     );
     reshade::set_config_value(
         nullptr, config_section, "NrBeforeSr", settings.nr_before_sr
-    );
-    reshade::set_config_value(
-        nullptr, config_section, "NrAfterPolish", settings.nr_after_polish
-    );
-    reshade::set_config_value(
-        nullptr, config_section, "NrToggleVk", settings.nr_toggle_vk
-    );
-    reshade::set_config_value(
-        nullptr, config_section, "NrToggleCtrl", settings.nr_toggle_ctrl
-    );
-    reshade::set_config_value(
-        nullptr, config_section, "NrToggleAlt", settings.nr_toggle_alt
-    );
-    reshade::set_config_value(
-        nullptr, config_section, "NrToggleShift", settings.nr_toggle_shift
     );
     reshade::set_config_value(
         nullptr, config_section, "NrFoveated", settings.nr_foveated
@@ -1266,6 +1115,8 @@ void save_settings_to_reshade(const Settings& settings) noexcept {
         }
     };
     changed |= ImGui::Checkbox("Enable foveated DLSS-SR", &settings.enabled);
+    ImGui::SameLine();
+    ImGui::TextDisabled("(Alt+Shift+/)");
     ImGui::BeginDisabled(!settings.enabled);
     preset_combo("Center preset", settings.center_preset, true);
     changed |= ImGui::Checkbox(
@@ -1547,6 +1398,11 @@ void draw_nr_controls(Settings& settings, bool& changed) {
     };
 
     changed |= ImGui::Checkbox("Foveated DLSS-NR", &settings.nr_foveated);
+    if (!settings.nr_foveated) {
+        ImGui::TextDisabled(
+            "Unfoveated NR covers the whole color texture. No crop."
+        );
+    }
     if (settings.nr_foveated) {
         int center_mode = 0;
         if (settings.center_mode == FoveationCenterMode::openxr_gaze) {
@@ -1664,7 +1520,9 @@ void draw_nr_controls(Settings& settings, bool& changed) {
             ImGuiSliderFlags_AlwaysClamp
         );
         ImGui::TextDisabled(
-            "Texture origin vs visible picture. Use if a zeroed box sits off-center."
+            "Texture origin vs visible picture, in render-resolution pixels. "
+            "Scaled to the output when NR runs after SR. Use if a zeroed box "
+            "sits off-center."
         );
         if (ImGui::TreeNode("Stereo mapping override")) {
             changed |= ImGui::Checkbox(
@@ -1702,7 +1560,7 @@ void draw_nr_controls(Settings& settings, bool& changed) {
         );
     }
     changed |= ImGui::Checkbox(
-        "Show NR crop rings (green=crop, yellow=NR live, magenta=passthrough)",
+        "Show 5 px green alignment border",
         &settings.nr_alignment_border_enabled
     );
 
@@ -1790,11 +1648,6 @@ void draw_nr_controls(Settings& settings, bool& changed) {
         const Settings defaults{};
         settings.nr_enabled = defaults.nr_enabled;
         settings.nr_before_sr = defaults.nr_before_sr;
-        settings.nr_after_polish = defaults.nr_after_polish;
-        settings.nr_toggle_vk = defaults.nr_toggle_vk;
-        settings.nr_toggle_ctrl = defaults.nr_toggle_ctrl;
-        settings.nr_toggle_alt = defaults.nr_toggle_alt;
-        settings.nr_toggle_shift = defaults.nr_toggle_shift;
         settings.nr_foveated = defaults.nr_foveated;
         settings.nr_use_sr_foveation = false;
         settings.nr_alignment_border_enabled =
@@ -1846,12 +1699,11 @@ void draw_settings_overlay(reshade::api::effect_runtime*) {
     );
     bool changed{};
 
-    ImGui::TextDisabled(CHEEKY_ADDON_NAME);
+        ImGui::TextDisabled("Really Cheeky Foveated NR v" CHEEKY_VERSION);
     ImGui::Separator();
     ImGui::TextUnformatted("Changes apply live to the next DLSS evaluation.");
     ImGui::TextDisabled(
-        "Game DLSS-SR is left native. DLSS-NR can run on the Color crop before "
-        "upscale, or after evaluate."
+        "Game DLSS-SR is left native. This add-on only runs DLSS-NR after evaluate."
     );
     ImGui::TextDisabled("DX12 Transport enables DX12 NR for DX11 games.");
     int d3d11_path = settings.d3d11_use_d3d12_transport ? 1 : 0;
@@ -1872,63 +1724,18 @@ void draw_settings_overlay(reshade::api::effect_runtime*) {
             "Enable DLSS-NR (DLSS 5)", &settings.nr_enabled
         );
         ImGui::SameLine();
-        char hotkey_label[96]{};
-        format_nr_hotkey(settings, hotkey_label, sizeof(hotkey_label));
-        ImGui::TextDisabled("(%s)", hotkey_label);
+        ImGui::TextDisabled("(Alt+Shift+/)");
         ImGui::TextDisabled(
             "Requires nvngx_dlssnr.dll beside this add-on and a DX12 processing path."
         );
-        const bool capturing = nr_hotkey_capturing.load(std::memory_order_acquire);
-        if (capturing) {
-            ImGui::SetNextFrameWantCaptureKeyboard(true);
-            ImGui::Text("Press a key for the NR toggle (Esc cancels).");
-            if (nr_hotkey_wait_release.load(std::memory_order_acquire)) {
-                if (!ImGui::IsAnyMouseDown() &&
-                    !ImGui::IsKeyDown(ImGuiKey_Escape)) {
-                    nr_hotkey_wait_release.store(false, std::memory_order_release);
-                }
-            } else if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-                nr_hotkey_capturing.store(false, std::memory_order_release);
-            } else if (const auto vk = first_imgui_hotkey_pressed(); vk != 0U) {
-                settings.nr_toggle_vk = vk;
-                settings.nr_toggle_ctrl = ImGui::GetIO().KeyCtrl;
-                settings.nr_toggle_alt = ImGui::GetIO().KeyAlt;
-                settings.nr_toggle_shift = ImGui::GetIO().KeyShift;
-                nr_hotkey_capturing.store(false, std::memory_order_release);
-                changed = true;
-            }
-        } else {
-            if (ImGui::Button("Change NR toggle key")) {
-                nr_hotkey_capturing.store(true, std::memory_order_release);
-                nr_hotkey_wait_release.store(true, std::memory_order_release);
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Clear NR toggle key")) {
-                settings.nr_toggle_vk = 0U;
-                settings.nr_toggle_ctrl = false;
-                settings.nr_toggle_alt = false;
-                settings.nr_toggle_shift = false;
-                changed = true;
-            }
-        }
         if (settings.nr_enabled) {
             changed |= ImGui::Checkbox(
                 "NR before upscale", &settings.nr_before_sr
             );
             ImGui::TextDisabled(
-                "DX11 Transport: NR Color, then Luma DLSS. Unchecked = NR on "
-                "Luma's output after upscale (easier to see the crop). "
-                "DX12: NR Color at this frame's DLSS input, then native SR."
+                "NR the Color render rect, then the game's DLSS. "
+                "Unchecked = NR the full DLSS output (no crop when unfoveated)."
             );
-            if (settings.nr_before_sr) {
-                changed |= ImGui::Checkbox(
-                    "Foveal polish after upscale", &settings.nr_after_polish
-                );
-                ImGui::TextDisabled(
-                    "Second, cheaper NR on a tighter fovea of the upscaled image "
-                    "(half working scale, ~40% blend). Off = before-NR only."
-                );
-            }
             if (ImGui::TreeNodeEx(
                     "Controls##dlss_nr",
                     ImGuiTreeNodeFlags_DefaultOpen
@@ -1989,25 +1796,21 @@ void on_present(
         );
     }
     auto settings = current_settings();
-    if (!nr_hotkey_capturing.load(std::memory_order_acquire)) {
-        const bool down = nr_toggle_hotkey_down(settings);
-        const bool was_down = toggle_hotkey_down.exchange(
-            down, std::memory_order_acq_rel
+    const bool down =
+        (GetAsyncKeyState(VK_MENU) & 0x8000) != 0 &&
+        (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 &&
+        (GetAsyncKeyState(VK_OEM_2) & 0x8000) != 0;
+    const bool was_down = toggle_hotkey_down.exchange(
+        down, std::memory_order_acq_rel
+    );
+    if (down && !was_down) {
+        settings.nr_enabled = !settings.nr_enabled;
+        update_settings(settings);
+        save_settings_to_reshade(settings);
+        trace_event(
+            "DLSS-NR hotkey Alt+Shift+/ toggled enabled=%s",
+            settings.nr_enabled ? "yes" : "no"
         );
-        if (down && !was_down) {
-            settings.nr_enabled = !settings.nr_enabled;
-            update_settings(settings);
-            save_settings_to_reshade(settings);
-            char hotkey_label[96]{};
-            format_nr_hotkey(settings, hotkey_label, sizeof(hotkey_label));
-            trace_event(
-                "DLSS-NR hotkey %s toggled enabled=%s",
-                hotkey_label,
-                settings.nr_enabled ? "yes" : "no"
-            );
-        }
-    } else {
-        toggle_hotkey_down.store(false, std::memory_order_release);
     }
 }
 
@@ -2131,7 +1934,7 @@ void set_addon_modules(
                 filename = path.data() + index + 1U;
             }
         }
-        constexpr wchar_t log_name[] = CHEEKY_ADDON_LOG;
+        constexpr wchar_t log_name[] = L"ReallyCheekyFoveatedNR.log";
         const auto prefix = static_cast<std::size_t>(filename - path.data());
         if (prefix + std::size(log_name) <= path.size()) {
             std::memcpy(
@@ -2145,7 +1948,7 @@ void set_addon_modules(
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 nullptr,
                 CREATE_ALWAYS,
-                FILE_ATTRIBUTE_NORMAL,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
                 nullptr
             );
             if (handle != INVALID_HANDLE_VALUE) {
@@ -2195,6 +1998,7 @@ void trace_event(const char* const format, ...) noexcept {
     AcquireSRWLockExclusive(&trace_log_lock);
     DWORD written{};
     static_cast<void>(WriteFile(handle, line.data(), bytes, &written, nullptr));
+    static_cast<void>(FlushFileBuffers(handle));
     ReleaseSRWLockExclusive(&trace_log_lock);
 }
 
@@ -2229,9 +2033,9 @@ void log_error(const char* const message) noexcept {
 
 }  // namespace cheeky::foveated_dlss
 
-extern "C" __declspec(dllexport) const char* NAME = CHEEKY_ADDON_NAME;
+extern "C" __declspec(dllexport) const char* NAME = "Really Cheeky Foveated NR";
 extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "Foveated DLSS-SR and DLSS-NR ReShade add-on (D3D11/D3D12).";
+    "Foveated DLSS-NR after native DLSS Super Resolution for Direct3D 11 and 12.";
 
 extern "C" __declspec(dllexport) bool AddonInit(
     const HMODULE addon,

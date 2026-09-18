@@ -28,6 +28,22 @@ struct DlssNrResourceBase {
     std::uint32_t render_height
 ) noexcept;
 
+struct DlssNrAxis { std::uint32_t base{}, extent{}; };
+// Align the extent independently of position, then clamp the moving origin.
+[[nodiscard]] DlssNrAxis dlss_nr_aligned_axis(
+    std::uint32_t base, std::uint32_t extent, std::uint32_t capacity
+) noexcept;
+
+struct DlssNrHistory {
+    std::uint32_t x{}, y{}, width{}, height{};
+    std::uint32_t output_width{}, output_height{};
+    std::uint32_t working_width{}, working_height{};
+    float scale_x{}, scale_y{};
+};
+
+[[nodiscard]] bool dlss_nr_motion_offset(const DlssNrHistory& previous,
+    const DlssNrHistory& current, float& x, float& y) noexcept;
+
 struct DlssNrViewCrop {
     std::uint32_t origin_x{};
     std::uint32_t origin_y{};
@@ -52,23 +68,16 @@ struct DlssNrDisplayedView {
     std::uint32_t travel_height = 0U
 ) noexcept;
 
-// Before-NR canvas from this evaluate's NGX sizes. Recomputed every frame so
-// resolution and DLSS quality changes apply without a game-specific path.
-// Packed stereo keeps the full Color allocation. An output-sized Color with a
-// smaller render subrect (HZD Balanced) stays on the subrect. Otherwise a
-// Color allocation larger than the NGX rect is input-space padding (AFOP).
-[[nodiscard]] DlssNrDisplayedView dlss_nr_pre_upscale_canvas(
-    std::uint32_t input_width,
-    std::uint32_t input_height,
-    std::uint32_t output_width,
-    std::uint32_t output_height,
+// After-SR: a larger color/output allocation is the displayed picture
+// (AFOP padding, Forbidden West look-around). Before-SR: that allocation is
+// often a ring; the NGX Color/render rect is the picture, so do not grow.
+[[nodiscard]] DlssNrDisplayedView dlss_nr_travel_extent(
+    std::uint32_t view_width,
+    std::uint32_t view_height,
     std::uint32_t color_width,
-    std::uint32_t color_height
+    std::uint32_t color_height,
+    bool before_upscale = false
 ) noexcept;
-
-// Cheap foveal after-SR pass used with NR-before. Tightens the crop, halves
-// working scale, and lowers blend so it is not a second full-strength NR.
-void apply_nr_after_polish(Settings& settings) noexcept;
 
 // Gaze u/v is 0-1 in that eye's displayed view. Adds a span-normalized offset
 // on top of the origin sliders so those sliders stay a bias / fallback.

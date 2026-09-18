@@ -63,6 +63,6 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Built and tested:"
-Write-Host (Join-Path $projectRoot "bin\$Configuration\CheekyFoveatedDLSS.addon64")
+    Write-Host (Join-Path $projectRoot "bin\$Configuration\ReallyCheekyFoveatedNR.addon64")
 Write-Host (Join-Path $projectRoot "bin\$Configuration\CheekyOpenXRLayer.dll")
 Write-Host (Join-Path $projectRoot "bin\$Configuration\XR_APILAYER_CHEEKY_foveated_dlss.json")

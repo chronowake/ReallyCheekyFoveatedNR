@@ -87,7 +87,7 @@ std::string file_version(const fs::path& path) {
 
 std::string settings_text(const Settings& s) {
     std::ostringstream out;
-    out << std::boolalpha << "[CheekyFoveatedDLSS]\n";
+    out << std::boolalpha << "[ReallyCheekyFoveatedNR]\n";
     out << "enabled=" << s.enabled << '\n';
     out << "d3d11_use_d3d12_transport=" << s.d3d11_use_d3d12_transport << '\n';
     out << "peripheral_dlaa_enabled=" << s.peripheral_dlaa_enabled << '\n';
@@ -334,11 +334,11 @@ PreparedReport create_report(const fs::path& addon, const fs::path& game,
         << "Review before attaching: logs may contain personal paths or identifiers.\n"
         << "Only add-on settings are exported; ReShade.ini is not included.\n"
         << "The crash log is optional and may belong to an earlier game session.\n\n";
-    collect_log(files, manifest, addon.parent_path() / L"CheekyFoveatedDLSS.log", "CheekyFoveatedDLSS.log");
+    collect_log(files, manifest, addon.parent_path() / L"ReallyCheekyFoveatedNR.log", "ReallyCheekyFoveatedNR.log");
     collect_log(files, manifest, game.parent_path() / L"ReShade.log", "ReShade-game.log");
     if (addon.parent_path() != game.parent_path())
         collect_log(files, manifest, addon.parent_path() / L"ReShade.log", "ReShade-addon.log");
-    collect_log(files, manifest, fs::path(temp.data()) / L"CheekyFoveatedDLSS_crash.log", "CheekyFoveatedDLSS_crash.log");
+    collect_log(files, manifest, fs::path(temp.data()) / L"ReallyCheekyFoveatedNR_crash.log", "ReallyCheekyFoveatedNR_crash.log");
 
     std::ostringstream system;
     system << "Game: " << utf8(game.filename().wstring()) << "\nGame version: " << file_version(game)

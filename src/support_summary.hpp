@@ -30,7 +30,7 @@ inline std::string support_summary(const std::string& system,
         const auto f = s->second.find(key);
         return f == s->second.end() ? std::string("unavailable") : f->second;
     };
-    const auto setting = [&](const char* key) { return get("CheekyFoveatedDLSS", key); };
+    const auto setting = [&](const char* key) { return get("ReallyCheekyFoveatedNR", key); };
     const bool nr = setting("nr_enabled") == "true";
     std::size_t longest{}, run{};
     for (const auto* text : {&system, &diagnostics, &settings}) {

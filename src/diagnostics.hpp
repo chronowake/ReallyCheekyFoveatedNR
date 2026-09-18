@@ -33,6 +33,17 @@ enum class DiagnosticGpuTiming : std::uint32_t {
     count,
 };
 
+// Per-frame cost probes. Unlike DiagnosticGpuTiming these are not averaged or
+// rate limited, so a single hitch survives into the log.
+enum class JitterProbe : std::uint32_t {
+    evaluate_interval,
+    nr_submit_cpu,
+    transport_evaluate_cpu,
+    transport_fence_wait_cpu,
+    nr_gpu,
+    count,
+};
+
 enum class DiagnosticState : std::uint32_t {
     waiting,
     disabled,
@@ -163,6 +174,35 @@ void diagnostic_note_frame_rate(
 [[nodiscard]] bool diagnostic_should_sample_gpu_time(
     DiagnosticGpuTiming timing
 ) noexcept;
+
+// Jitter probes. diagnostic_note_jitter_frame marks a frame boundary, measures
+// the interval since the previous one, and flushes a summary line to the log
+// once per window.
+void diagnostic_note_jitter(JitterProbe probe, double milliseconds) noexcept;
+void diagnostic_note_jitter_frame() noexcept;
+[[nodiscard]] std::int64_t diagnostic_jitter_now_ns() noexcept;
+
+// Records wall time from construction to destruction against one probe.
+class JitterScope {
+public:
+    JitterScope(const JitterProbe probe, const std::int64_t start_ns) noexcept
+        : probe_(probe), start_ns_(start_ns) {}
+
+    JitterScope(const JitterScope&) = delete;
+    JitterScope& operator=(const JitterScope&) = delete;
+
+    ~JitterScope() {
+        diagnostic_note_jitter(
+            probe_,
+            static_cast<double>(diagnostic_jitter_now_ns() - start_ns_) /
+                1'000'000.0
+        );
+    }
+
+private:
+    JitterProbe probe_{};
+    std::int64_t start_ns_{};
+};
 void diagnostic_note_d3d11_execution_path(D3D11ExecutionPath path) noexcept;
 void diagnostic_note_d3d11_transport_status(D3D11TransportStatus status) noexcept;
 
