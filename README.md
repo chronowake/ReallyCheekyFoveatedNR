@@ -1,4 +1,4 @@
-This is an NR fork of cheeky, not the original. It is built for compatibility with R.E.A.L. VR, that it's sole purpose.
+This is an NR only fork of cheeky, not the original. It is built for compatibility with R.E.A.L. VR, that is it's sole purpose.
 
 **Note:** the native SteamVR / OpenVR gaze adapter described in the original readme is not active in this fork. Eye tracking and automatic stereo alignment work through the OpenXR layer only.
 
